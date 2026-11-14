@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = BASE_DIR / "src"
 DATA_DIR = BASE_DIR / "data"
-HARMONIZED_DIR = DATA_DIR / "harmonized"
+HARMONIZED_DIR = DATA_DIR / "harmonize"
 ANALYTICS_DIR = DATA_DIR / "analytics"
 QUERIES_CACHE_DIR = DATA_DIR / "queries_cache"
 
@@ -70,7 +70,7 @@ def check_pipeline_modules() -> Dict[str, Dict[str, Any]]:
         "ingest": {
             "expected_file": "ingest.py",
             "path": SRC_DIR / "ingest.py",
-            "alias_path": SRC_DIR / "inget.py",
+            "alias_path": SRC_DIR / "ingest.py",
             "status": "missing",
             "size_bytes": 0,
             "has_required_interface": False,

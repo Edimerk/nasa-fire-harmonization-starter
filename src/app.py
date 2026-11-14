@@ -1,8 +1,9 @@
 """
-Aplicación Web MVP - Calendario Armonizado de Actividad de Incendios
+Aplicación Web MVP - GEOVISOR INTERACTIVO CENTRADO EN EL MAPA
 NASA Space Apps Challenge 2026 - Harmonization of MODIS and VIIRS Hot Spots
-Sprint 4: Interfaz de usuario interactiva, analítica geoespacial, exportación segura
-y orquestador de integración con los Sprints 1, 2 y 3.
+Sprint 4: El mapa es el controlador interactivo principal de la aplicación.
+La selección de área, paneo/zoom y clics en detecciones disparan automáticamente
+los análisis históricos, calendario, anomalías y orquestación del pipeline.
 """
 
 from pathlib import Path
@@ -14,11 +15,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import folium
-from folium.plugins import Draw
+from folium.plugins import Draw, FastMarkerCluster
 from streamlit_folium import st_folium
 from shapely.geometry import shape
 
-# Asegurar que el directorio src esté en sys.path
+# Asegurar importación de módulos hermanos
 SRC_DIR = Path(__file__).resolve().parent
 BASE_DIR = SRC_DIR.parent
 if str(SRC_DIR) not in sys.path:
@@ -48,24 +49,23 @@ from pipeline_adapter import (
     BBOX_COLOMBIA_COBERTURA,
 )
 
-# --- Configuración de rutas de datos ---
+# --- Rutas de datos ---
 DATA_DIR = BASE_DIR / "data"
 HARMONIZED_DIR = DATA_DIR / "harmonized"
 ANALYTICS_DIR = DATA_DIR / "analytics"
 
-# --- Paleta visual accesible ---
+# --- Paletas de color accesibles y contrastantes ---
 HEATMAP_COLORSCALE = "YlOrRd"
 ANOMALY_COLOR_MAP = {
-    "alta": "#D32F2F",                # Rojo cálido accesible
+    "alta": "#D32F2F",                # Rojo accesible
     "alta (mediana 0)": "#E65100",     # Naranja oscuro
     "normal": "#2E7D32",              # Verde bosque
     "baja": "#1976D2",                # Azul zafiro
     "sin_referencia": "#757575"       # Gris neutro
 }
 
-# Regiones geográficas predefinidas de Colombia (w, s, e, n)
 REGIONES_PRESET = {
-    "Toda Colombia (Cobertura Completa)": (-81.71, -4.23, -66.90, 12.56),
+    "Toda Colombia (Nacional)": (-81.71, -4.23, -66.90, 12.56),
     "Región Caribe (Norte)": (-77.50, 7.80, -71.00, 12.56),
     "Región Andina (Centro)": (-77.20, 1.50, -72.50, 8.50),
     "Región Amazonía (Sur)": (-75.50, -4.23, -69.50, 1.50),
@@ -73,23 +73,30 @@ REGIONES_PRESET = {
     "Región Pacífica (Occidente)": (-79.20, 1.00, -76.20, 7.50)
 }
 
-# --- Configuración de página Streamlit ---
+# --- Configuración de página amplia para Geovisor ---
 st.set_page_config(
-    page_title="Calendario de Incendios | NASA FIRMS",
+    page_title="Geovisor de Incendios | NASA FIRMS",
     page_icon="🔥",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"  # Colapsado por defecto para dar protagonismo al mapa
 )
 
-# --- Carga de datos optimizada en RAM ---
+# Inyección de estilos CSS para un geovisor limpio y profesional
+st.markdown("""
+<style>
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    .stMetric { background: #f8f9fa; padding: 10px 15px; border-radius: 8px; border-left: 4px solid #D32F2F; }
+    .leaflet-container { border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- Carga optimizada de dataset nacional ---
 @st.cache_data(show_spinner=False)
 def load_harmonized_data():
-    """
-    Carga el dataset armonizado nacional optimizando tipos de datos.
-    """
     csv_path = HARMONIZED_DIR / "incendios_armonizados.csv"
     if not csv_path.exists():
-        return None, "No se encontró el archivo de datos en: data/harmonized/incendios_armonizados.csv"
+        return None, "No se encontró data/harmonized/incendios_armonizados.csv"
 
     dtypes = {
         "latitude": "float32",
@@ -115,388 +122,372 @@ def load_harmonized_data():
         df["year_month"] = df["timestamp"].dt.to_period("M").astype(str)
         return df, ""
     except Exception:
-        return None, "Error interno al leer el archivo de datos armonizados."
+        return None, "Error interno al leer archivo de incendios armonizados."
 
 
-@st.cache_data(show_spinner=False)
-def load_sprint3_analytics():
-    """Carga resultados precalculados de Sprint 3 si están disponibles."""
-    results = {}
-    try:
-        anom_path = ANALYTICS_DIR / "anomalies.csv"
-        if anom_path.exists():
-            results["anomalies"] = pd.read_csv(anom_path)
-        med_path = ANALYTICS_DIR / "historical_median.csv"
-        if med_path.exists():
-            results["historical_median"] = pd.read_csv(med_path)
-    except Exception:
-        pass
-    return results
-
-
-# ==========================================
-# Carga inicial y validación de dataset
-# ==========================================
 df_raw, load_error = load_harmonized_data()
-
 if df_raw is None or df_raw.empty:
-    st.error(f"⚠️ {load_error or 'No hay datos disponibles.'}")
-    st.info("Verifique que data/harmonized/incendios_armonizados.csv esté presente.")
+    st.error(f"⚠️ {load_error}")
     st.stop()
 
-# Límites del dataset nacional
 ds_lat_min, ds_lat_max = float(df_raw["latitude"].min()), float(df_raw["latitude"].max())
 ds_lon_min, ds_lon_max = float(df_raw["longitude"].min()), float(df_raw["longitude"].max())
 ds_min_date = df_raw["timestamp"].min().date()
 ds_max_date = df_raw["timestamp"].max().date()
 
 # ==========================================
-# Gestión de Estado de Filtros (Session State)
+# Inicialización de Estado de Sesión (Session State)
 # ==========================================
-if "lat_min" not in st.session_state:
-    st.session_state["lat_min"] = ds_lat_min
-if "lat_max" not in st.session_state:
-    st.session_state["lat_max"] = ds_lat_max
-if "lon_min" not in st.session_state:
-    st.session_state["lon_min"] = ds_lon_min
-if "lon_max" not in st.session_state:
-    st.session_state["lon_max"] = ds_lon_max
+if "active_bbox" not in st.session_state:
+    st.session_state["active_bbox"] = (ds_lon_min, ds_lat_min, ds_lon_max, ds_lat_max)
+if "map_center" not in st.session_state:
+    st.session_state["map_center"] = [4.5, -73.5]
+if "map_zoom" not in st.session_state:
+    st.session_state["map_zoom"] = 6
+if "selected_object" not in st.session_state:
+    st.session_state["selected_object"] = None
+if "sync_with_viewport" not in st.session_state:
+    st.session_state["sync_with_viewport"] = False
+if "date_range" not in st.session_state:
+    st.session_state["date_range"] = (ds_min_date, ds_max_date)
+if "trigger_source" not in st.session_state:
+    st.session_state["trigger_source"] = "Inicial"
 
 # ==========================================
-# Barra lateral: Configuración y Filtros
+# Encabezado del Geovisor
 # ==========================================
-st.sidebar.title("🔥 Control de Consulta")
-st.sidebar.caption("Filtros espaciotemporales y Pipeline de Procesamiento")
+col_title, col_ctrls = st.columns([5, 4])
+with col_title:
+    st.markdown("### 🔥 Geovisor Interactivo de Incendios | NASA FIRMS (MODIS + VIIRS)")
+    st.caption("🌍 **El mapa es el controlador:** Dibuje un rectángulo con el icono ▢ o ajuste la vista para filtrar automáticamente las estadísticas.")
 
-# Estado de los módulos del Pipeline
-modules_status = check_pipeline_modules()
+with col_ctrls:
+    # Controles compactos superiores
+    c_preset, c_dates = st.columns([2, 2])
+    with c_preset:
+        sel_preset = st.selectbox(
+            "Región Rápida:",
+            options=["Seleccionar preset..."] + list(REGIONES_PRESET.keys()),
+            index=0,
+            label_visibility="collapsed"
+        )
+        if sel_preset != "Seleccionar preset...":
+            p_w, p_s, p_e, p_n = REGIONES_PRESET[sel_preset]
+            st.session_state["active_bbox"] = (p_w, p_s, p_e, p_n)
+            st.session_state["map_center"] = [(p_s + p_n) / 2, (p_w + p_e) / 2]
+            st.session_state["map_zoom"] = 6 if sel_preset.startswith("Toda") else 7
+            st.session_state["trigger_source"] = f"Preset: {sel_preset}"
 
-with st.sidebar.expander("🔗 Estado del Pipeline (Sprints 1–3)", expanded=False):
-    s1_ok = modules_status["ingest"]["status"] == "present" and modules_status["ingest"]["has_required_interface"]
-    s2_ok = modules_status["harmonize"]["status"] == "present" and modules_status["harmonize"]["has_required_interface"]
-    s3_ok = modules_status["analytics"]["status"] == "present" and modules_status["analytics"]["has_required_interface"]
+    with c_dates:
+        # Selector compacto de fechas
+        d_input = st.date_input(
+            "Rango de Fechas:",
+            value=st.session_state["date_range"],
+            min_value=ds_min_date,
+            max_value=ds_max_date,
+            label_visibility="collapsed"
+        )
+        if isinstance(d_input, (tuple, list)) and len(d_input) == 2:
+            st.session_state["date_range"] = d_input
 
-    st.markdown(f"**Sprint 1 (Ingesta):** {'🟢 Listo' if s1_ok else '🟡 Pendiente (0 B)'}")
-    st.caption(modules_status["ingest"]["details"])
-    st.markdown(f"**Sprint 2 (Armonización):** {'🟢 Listo' if s2_ok else '🟡 Pendiente (0 B)'}")
-    st.caption(modules_status["harmonize"]["details"])
-    st.markdown(f"**Sprint 3 (Analítica):** {'🟢 Listo' if s3_ok else '🟡 Pendiente (0 B)'}")
-    st.caption(modules_status["analytics"]["details"])
-    st.markdown("**Sprint 4 (Visualizador Web):** 🟢 Operativo")
-
-# 1. Selección Geográfica
-st.sidebar.subheader("📍 1. Selección Geográfica")
-
-geo_method = st.sidebar.radio(
-    "Modalidad de selección:",
-    options=["Región Predefinida", "Dibujar en Mapa", "Coordenadas Manuales"],
-    index=0
-)
-
-if geo_method == "Región Predefinida":
-    preset_choice = st.sidebar.selectbox(
-        "Seleccione región geográfica:",
-        options=list(REGIONES_PRESET.keys()),
-        index=0
-    )
-    p_w, p_s, p_e, p_n = REGIONES_PRESET[preset_choice]
-    st.session_state["lat_min"] = max(ds_lat_min, p_s)
-    st.session_state["lat_max"] = min(ds_lat_max, p_n)
-    st.session_state["lon_min"] = max(ds_lon_min, p_w)
-    st.session_state["lon_max"] = min(ds_lon_max, p_e)
-
-elif geo_method == "Dibujar en Mapa":
-    st.sidebar.caption("Trace un rectángulo en el visor para capturar las coordenadas:")
-    center_lat = (st.session_state["lat_min"] + st.session_state["lat_max"]) / 2
-    center_lon = (st.session_state["lon_min"] + st.session_state["lon_max"]) / 2
-
-    m_draw = folium.Map(
-        location=[center_lat, center_lon],
-        zoom_start=5,
-        tiles="OpenStreetMap"
-    )
-    Draw(
-        export=False,
-        draw_options={
-            "polyline": False,
-            "polygon": False,
-            "circle": False,
-            "circlemarker": False,
-            "marker": False,
-            "rectangle": True
-        },
-        edit_options={"edit": True, "remove": True}
-    ).add_to(m_draw)
-
-    map_draw_state = st_folium(
-        m_draw,
-        height=260,
-        returned_objects=["last_active_drawing"],
-        key="folium_draw_selector"
-    )
-
-    if map_draw_state and map_draw_state.get("last_active_drawing"):
-        try:
-            geom = shape(map_draw_state["last_active_drawing"]["geometry"])
-            b = geom.bounds  # (minx, miny, maxx, maxy) -> (lon_min, lat_min, lon_max, lat_max)
-            st.session_state["lon_min"] = float(round(b[0], 2))
-            st.session_state["lat_min"] = float(round(b[1], 2))
-            st.session_state["lon_max"] = float(round(b[2], 2))
-            st.session_state["lat_max"] = float(round(b[3], 2))
-            st.sidebar.success("Área dibujada capturada exitosamente.")
-        except Exception:
-            pass
-
-elif geo_method == "Coordenadas Manuales":
-    st.sidebar.caption("Defina los límites exactos en grados decimales (WGS84):")
-    c1, c2 = st.sidebar.columns(2)
-    st.session_state["lat_min"] = c1.number_input(
-        "Lat Mín (Sur)",
-        value=float(round(st.session_state["lat_min"], 2)),
-        min_value=-90.0, max_value=90.0, step=0.25, format="%.2f"
-    )
-    st.session_state["lat_max"] = c2.number_input(
-        "Lat Máx (Norte)",
-        value=float(round(st.session_state["lat_max"], 2)),
-        min_value=-90.0, max_value=90.0, step=0.25, format="%.2f"
-    )
-
-    c3, c4 = st.sidebar.columns(2)
-    st.session_state["lon_min"] = c3.number_input(
-        "Lon Mín (Oeste)",
-        value=float(round(st.session_state["lon_min"], 2)),
-        min_value=-180.0, max_value=180.0, step=0.25, format="%.2f"
-    )
-    st.session_state["lon_max"] = c4.number_input(
-        "Lon Máx (Este)",
-        value=float(round(st.session_state["lon_max"], 2)),
-        min_value=-180.0, max_value=180.0, step=0.25, format="%.2f"
-    )
-
-active_lat_min = st.session_state["lat_min"]
-active_lat_max = st.session_state["lat_max"]
-active_lon_min = st.session_state["lon_min"]
-active_lon_max = st.session_state["lon_max"]
-
-# Validación de coordenadas
-is_geo_valid, geo_err_msg = validate_coordinates(
-    active_lat_min, active_lat_max, active_lon_min, active_lon_max
-)
-if not is_geo_valid:
-    st.sidebar.error(f"❌ {geo_err_msg}")
-    st.error(f"**Error en coordenadas geográficas:** {geo_err_msg}")
+date_start, date_end = st.session_state["date_range"]
+is_dt_valid, dt_msg = validate_dates(date_start, date_end, ds_min_date, ds_max_date)
+if not is_dt_valid:
+    st.error(f"⚠️ {dt_msg}")
     st.stop()
 
-active_bbox = (active_lon_min, active_lat_min, active_lon_max, active_lat_max)
+# ==========================================
+# Barra Lateral (Configuración y Filtros Opcionales)
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ Ajustes del Geovisor")
+    
+    st.subheader("🛰️ Filtros por Sensor y Confianza")
+    avail_sources = sorted(df_raw["source"].unique())
+    sel_sources = st.multiselect("Sensores satelitales:", options=avail_sources, default=avail_sources)
+    
+    avail_conf = sorted(df_raw["confidence_level"].unique())
+    sel_conf = st.multiselect("Nivel de confianza:", options=avail_conf, default=avail_conf)
+    
+    st.divider()
+    st.subheader("🧭 Sincronización Automática")
+    sync_viewport = st.checkbox(
+        "Sincronizar con paneo y zoom",
+        value=st.session_state["sync_with_viewport"],
+        help="Si está activo, al desplazar o hacer zoom en el mapa, las estadísticas se recalculan para la ventana visible."
+    )
+    st.session_state["sync_with_viewport"] = sync_viewport
 
-# 2. Selección Temporal
-st.sidebar.subheader("📅 2. Ventana Temporal")
+    st.divider()
+    st.subheader("📐 Coordenadas del Bounding Box Activo")
+    cur_w, cur_s, cur_e, cur_n = st.session_state["active_bbox"]
+    c_lat1, c_lat2 = st.columns(2)
+    new_s = c_lat1.number_input("Lat Mín", value=float(round(cur_s, 2)), format="%.2f")
+    new_n = c_lat2.number_input("Lat Máx", value=float(round(cur_n, 2)), format="%.2f")
+    c_lon1, c_lon2 = st.columns(2)
+    new_w = c_lon1.number_input("Lon Mín", value=float(round(cur_w, 2)), format="%.2f")
+    new_e = c_lon2.number_input("Lon Máx", value=float(round(cur_e, 2)), format="%.2f")
 
-c_date1, c_date2 = st.sidebar.columns(2)
-date_start = c_date1.date_input("Desde:", value=ds_min_date, min_value=ds_min_date, max_value=ds_max_date)
-date_end = c_date2.date_input("Hasta:", value=ds_max_date, min_value=ds_min_date, max_value=ds_max_date)
+    if (new_w != cur_w or new_s != cur_s or new_e != cur_e or new_n != cur_n):
+        val_c, msg_c = validate_coordinates(new_s, new_n, new_w, new_e)
+        if val_c:
+            st.session_state["active_bbox"] = (new_w, new_s, new_e, new_n)
+            st.session_state["trigger_source"] = "Entrada Manual"
+            st.rerun()
 
-# Validación de fechas
-is_date_valid, date_err_msg = validate_dates(date_start, date_end, ds_min_date, ds_max_date)
-if not is_date_valid:
-    st.sidebar.error(f"❌ {date_err_msg}")
-    st.error(f"**Error en rango de fechas:** {date_err_msg}")
-    st.stop()
-
-# 3. Filtros opcionales por sensor y confianza
-st.sidebar.subheader("🛰️ 3. Filtros de Detección (Opcional)")
-selected_sources = st.sidebar.multiselect(
-    "Sensores satelitales:",
-    options=sorted(df_raw["source"].unique()),
-    default=sorted(df_raw["source"].unique())
-)
-selected_confidences = st.sidebar.multiselect(
-    "Nivel de confianza:",
-    options=sorted(df_raw["confidence_level"].unique()),
-    default=sorted(df_raw["confidence_level"].unique())
-)
-
-# Botón de confirmación para procesar
-btn_confirmar = st.sidebar.button("⚡ Procesar / Actualizar Área", type="primary", use_container_width=True)
+    if st.button("🔄 Restablecer a Toda Colombia", use_container_width=True):
+        st.session_state["active_bbox"] = (ds_lon_min, ds_lat_min, ds_lon_max, ds_lat_max)
+        st.session_state["map_center"] = [4.5, -73.5]
+        st.session_state["map_zoom"] = 6
+        st.session_state["trigger_source"] = "Restablecer"
+        st.rerun()
 
 # ==========================================
-# Orquestación del Pipeline (Sprints 1 → 2 → 3 → 4)
+# SECCIÓN 1: EL GEOVISOR COMO PROTAGONISTA
 # ==========================================
-pipeline_result = request_pipeline_execution(active_bbox, date_start, date_end)
+active_w, active_s, active_e, active_n = st.session_state["active_bbox"]
 
-# ==========================================
-# Encabezado Principal y Avisos Metodológicos
-# ==========================================
-st.title("🔥 Calendario Armonizado de Actividad de Incendios")
-st.markdown(
-    "**NASA Space Apps Challenge 2026** — *Harmonization of MODIS and VIIRS Hot Spots*  \n"
-    "Sistema integrado: Ingesta (Sprint 1) → Armonización (Sprint 2) → Analítica (Sprint 3) → Visualización (Sprint 4)."
+# Filtrar datos de la región para graficar en el mapa
+df_active_region = filter_bbox(df_raw, st.session_state["active_bbox"])
+if sel_sources:
+    df_active_region = df_active_region[df_active_region["source"].isin(sel_sources)]
+if sel_conf:
+    df_active_region = df_active_region[df_active_region["confidence_level"].isin(sel_conf)]
+df_active_filtered = filter_dates(df_active_region, date_start, date_end)
+
+# Construir mapa interactivo Folium
+m = folium.Map(
+    location=st.session_state["map_center"],
+    zoom_start=st.session_state["map_zoom"],
+    tiles="OpenStreetMap"
 )
 
-# Identificación clara del dataset
-st.caption(
-    "📌 **Dataset Activo:** Serie histórica cerrada 2015–2020 | Cobertura: Colombia | "
-    "Sensores: MODIS (Terra/Aqua 1 km) y VIIRS (Suomi-NPP 375 m) | NASA FIRMS"
+# Herramienta Draw para dibujo de rectángulos
+Draw(
+    export=False,
+    draw_options={
+        "polyline": False,
+        "polygon": False,
+        "circle": False,
+        "circlemarker": False,
+        "marker": False,
+        "rectangle": True
+    },
+    edit_options={"edit": True, "remove": True}
+).add_to(m)
+
+# Resaltar Bounding Box activo
+folium.Rectangle(
+    bounds=[[active_s, active_w], [active_n, active_e]],
+    color="#D32F2F",
+    weight=3,
+    fill=True,
+    fill_color="#FFCDD2",
+    fill_opacity=0.2,
+    popup=f"Área activa de consulta: {len(df_active_filtered):,} focos",
+    tooltip="Área de consulta activa"
+).add_to(m)
+
+# Capa de puntos reales con clustering eficiente para rendimiento
+# Muestra hasta 3.000 puntos interactivos en la zona activa sin degradar el navegador
+MAX_MAP_DETECTIONS = 3000
+if len(df_active_filtered) > 0:
+    pts_sample = df_active_filtered if len(df_active_filtered) <= MAX_MAP_DETECTIONS else df_active_filtered.sample(MAX_MAP_DETECTIONS, random_state=42)
+    
+    # Preparar datos de FastMarkerCluster: lista de [lat, lon]
+    cluster_data = pts_sample[["latitude", "longitude"]].values.tolist()
+    FastMarkerCluster(data=cluster_data, name="Focos Térmicos (Cluster)").add_to(m)
+
+    # Añadir marcadores individuales detallados para los 200 focos más intensos (FRP alto)
+    top_focos = pts_sample.nlargest(min(200, len(pts_sample)), "frp")
+    fg_top = folium.FeatureGroup(name="Detecciones destacadas (FRP Alto)")
+    for _, pt in top_focos.iterrows():
+        is_viirs = str(pt["source"]) == "viirs-snpp"
+        col = "#D32F2F" if is_viirs else "#FB8C00"
+        folium.CircleMarker(
+            location=[float(pt["latitude"]), float(pt["longitude"])],
+            radius=4,
+            color=col,
+            fill=True,
+            fill_color=col,
+            fill_opacity=0.8,
+            popup=folium.Popup(
+                f"<b>Detección Satelital:</b> {pt['source']}<br>"
+                f"<b>Fecha:</b> {pt['timestamp']}<br>"
+                f"<b>Confianza:</b> {pt.get('confidence_level', 'N/A')}<br>"
+                f"<b>FRP:</b> {pt.get('frp', 0.0)} MW<br>"
+                f"<b>Satélite:</b> {pt.get('satellite', 'N/A')} ({pt.get('instrument', 'N/A')})",
+                max_width=250
+            ),
+            tooltip=f"{pt['source']} | FRP: {pt.get('frp', 0.0)} MW"
+        ).add_to(fg_top)
+    fg_top.add_to(m)
+
+folium.LayerControl(collapsed=True).add_to(m)
+
+# RENDERIZADO DEL MAPA PRINCIPAL
+map_events = st_folium(
+    m,
+    height=480,
+    use_container_width=True,
+    returned_objects=["last_active_drawing", "bounds", "last_clicked"],
+    key="main_geovisor"
 )
 
-# Aviso metodológico NASA
-st.info(
-    "🛰️ **Aviso científico NASA FIRMS:** Las cifras corresponden a **detecciones térmicas satelitales "
-    "(focos de calor / hot spots)** armonizadas a nivel de píxel y deduplicadas espaciotemporalmente (1 km, 3 h). "
-    "No deben interpretarse directamente como incendios individuales en tierra.",
-    icon="ℹ️"
-)
+# ==========================================
+# GESTIÓN AUTOMÁTICA DE EVENTOS DEL MAPA
+# ==========================================
+map_needs_rerun = False
 
-# Verificación de cobertura geográfica
-if not pipeline_result["can_visualize"]:
-    # El usuario seleccionó una región fuera de Colombia que requiere ejecutar los Sprints 1, 2 y 3
-    st.warning("⚠️ **Atención: Área fuera de la cobertura precalculada de Colombia**")
+# Evento A: Dibujo de Rectángulo (Prioridad 1)
+if map_events and map_events.get("last_active_drawing"):
+    try:
+        drawing_geom = shape(map_events["last_active_drawing"]["geometry"])
+        db = drawing_geom.bounds # minx, miny, maxx, maxy -> lon_min, lat_min, lon_max, lat_max
+        new_bbox = (float(round(db[0], 2)), float(round(db[1], 2)), float(round(db[2], 2)), float(round(db[3], 2)))
+        
+        # Comprobar si es un dibujo nuevo diferente al actual
+        if new_bbox != st.session_state["active_bbox"]:
+            is_valid_d, _ = validate_coordinates(new_bbox[1], new_bbox[3], new_bbox[0], new_bbox[2])
+            if is_valid_d:
+                st.session_state["active_bbox"] = new_bbox
+                st.session_state["map_center"] = [(new_bbox[1] + new_bbox[3]) / 2, (new_bbox[0] + new_bbox[2]) / 2]
+                st.session_state["trigger_source"] = "Rectángulo Dibujado"
+                map_needs_rerun = True
+    except Exception:
+        pass
+
+# Evento B: Paneo y Zoom (Si la sincronización está activa y no hay dibujo reciente)
+elif st.session_state["sync_with_viewport"] and map_events and map_events.get("bounds"):
+    b_view = map_events["bounds"]
+    # bounds tiene _southWest y _northEast
+    if "_southWest" in b_view and "_northEast" in b_view:
+        view_s = float(round(b_view["_southWest"]["lat"], 2))
+        view_w = float(round(b_view["_southWest"]["lng"], 2))
+        view_n = float(round(b_view["_northEast"]["lat"], 2))
+        view_e = float(round(b_view["_northEast"]["lng"], 2))
+        
+        # Aplicar umbral de cambio para no disparar con micromovimientos (> 0.25 grados)
+        cur_w, cur_s, cur_e, cur_n = st.session_state["active_bbox"]
+        diff = max(abs(view_w - cur_w), abs(view_s - cur_s), abs(view_e - cur_e), abs(view_n - cur_n))
+        if diff >= 0.25:
+            is_valid_v, _ = validate_coordinates(view_s, view_n, view_w, view_e)
+            if is_valid_v:
+                st.session_state["active_bbox"] = (view_w, view_s, view_e, view_n)
+                st.session_state["map_center"] = [(view_s + view_n) / 2, (view_w + view_e) / 2]
+                st.session_state["trigger_source"] = "Paneo / Zoom de Ventana"
+                map_needs_rerun = True
+
+# Evento C: Clic en el Mapa
+if map_events and map_events.get("last_clicked"):
+    st.session_state["selected_object"] = map_events["last_clicked"]
+
+if map_needs_rerun:
+    st.rerun()
+
+# ==========================================
+# BARRA DE ESTADO DE LA REGIÓN ACTIVA
+# ==========================================
+c_info1, c_info2, c_info3 = st.columns([4, 4, 3])
+with c_info1:
     st.markdown(
-        f"Ha seleccionado una región geográfica externa: `Lat: [{active_lat_min:.2f}°, {active_lat_max:.2f}°]`, "
-        f"`Lon: [{active_lon_min:.2f}°, {active_lon_max:.2f}°]`."
+        f"📍 **Región Activa:** `Lat: [{active_s:.2f}°, {active_n:.2f}°]` | `Lon: [{active_w:.2f}°, {active_e:.2f}°]`  \n"
+        f"*(Origen: {st.session_state['trigger_source']})*"
+    )
+with c_info2:
+    st.markdown(
+        f"📅 **Periodo:** `{date_start}` al `{date_end}` ({(date_end - date_start).days + 1:,} días)  \n"
+        f"*(Comparación contra mediana histórica territorial)*"
+    )
+with c_info3:
+    if st.session_state.get("selected_object"):
+        clat = st.session_state["selected_object"]["lat"]
+        clon = st.session_state["selected_object"]["lng"]
+        st.markdown(f"🎯 **Último Clic:** `{clat:.4f}°, {clon:.4f}°`")
+    else:
+        st.markdown("🎯 *Haga clic en un foco para ver su detalle.*")
+
+st.divider()
+
+# ==========================================
+# SECCIÓN 2: ORQUESTADOR DEL PIPELINE
+# ==========================================
+pipeline_res = request_pipeline_execution(st.session_state["active_bbox"], date_start, date_end)
+
+if not pipeline_res["can_visualize"]:
+    st.warning("⚠️ **Zona Geográfica fuera de Cobertura Nacional de Colombia**")
+    st.markdown(
+        f"El área seleccionada `[{active_s:.2f}°, {active_n:.2f}° N, {active_w:.2f}°, {active_e:.2f}° O]` "
+        f"requiere ejecutar el pipeline completo de procesamiento: `ingest.py` → `harmonize.py` → `analytics.py`."
     )
     st.error(
-        "**Requisito de la profesora:** Para procesar una nueva área fuera del dataset nacional, "
-        "el sistema debe ejecutar secuencialmente:  \n"
-        "1. Ingesta (`ingest.py`) desde NASA FIRMS.  \n"
-        "2. Armonización (`harmonize.py`) MODIS ↔ VIIRS.  \n"
-        "3. Analítica (`analytics.py`) para agregaciones y anomalías.  \n\n"
-        "**Estado actual:** Los scripts de los compañeros se encuentran actualmente **pendientes o con archivos vacíos (0 bytes)**."
+        f"**Estado del Pipeline:** {pipeline_res['message']}  \n"
+        f"Módulos pendientes de código de los compañeros: `{', '.join(pipeline_res['pending_modules'])}`."
     )
-
-    with st.expander("📋 Ver contratos técnicos pendientes que deben implementar los otros integrantes", expanded=True):
-        contracts = get_required_contracts_doc()
-        for s_key, c_info in contracts.items():
-            st.markdown(f"### {c_info['responsable']} (`{c_info['modulo']}`)")
-            st.code(c_info["firma_requerida"], language="python")
-            st.markdown(f"- **Salidas esperadas:** `{', '.join(c_info['salidas_esperadas'])}`")
-            st.markdown(f"- **Regla científica:** {c_info['regla_cientifica']}")
-            st.divider()
-
-    st.info("💡 **Solución:** Utilice una región dentro de la cobertura de Colombia (2015–2020) para explorar el visor funcional.")
-    if st.button("⬅️ Restablecer a Toda Colombia"):
-        st.session_state["lat_min"] = ds_lat_min
-        st.session_state["lat_max"] = ds_lat_max
-        st.session_state["lon_min"] = ds_lon_min
-        st.session_state["lon_max"] = ds_lon_max
+    if st.button("⬅️ Regresar a Cobertura Colombia"):
+        st.session_state["active_bbox"] = (ds_lon_min, ds_lat_min, ds_lon_max, ds_lat_max)
         st.rerun()
     st.stop()
 
 # ==========================================
-# Filtrado de Datos en Memoria (Cobertura Activa)
+# SECCIÓN 3: PANEL DE ESTADÍSTICAS DINÁMICAS (PANELES INFERIORES)
 # ==========================================
-df_region = filter_bbox(df_raw, active_bbox)
-
-if selected_sources:
-    df_region = df_region[df_region["source"].isin(selected_sources)]
-if selected_confidences:
-    df_region = df_region[df_region["confidence_level"].isin(selected_confidences)]
-
-df_filtered = filter_dates(df_region, date_start, date_end)
-
-# Indicador de conteo en la barra lateral
-st.sidebar.divider()
-pct_total = (len(df_filtered) / len(df_raw) * 100) if len(df_raw) > 0 else 0.0
-st.sidebar.metric(
-    "Detecciones en consulta",
-    f"{len(df_filtered):,}",
-    delta=f"{pct_total:.1f}% del total nacional"
-)
-
-# Badge de consulta activa
-is_full_coverage = (
-    abs(active_lat_min - ds_lat_min) < 0.1 and abs(active_lat_max - ds_lat_max) < 0.1 and
-    abs(active_lon_min - ds_lon_min) < 0.1 and abs(active_lon_max - ds_lon_max) < 0.1
-)
-
-c_b1, c_b2 = st.columns([2, 3])
-with c_b1:
-    st.markdown(
-        f"**Área activa:** `Lat: [{active_lat_min:.2f}°, {active_lat_max:.2f}°] | Lon: [{active_lon_min:.2f}°, {active_lon_max:.2f}°]`  \n"
-        f"*(Modo: {'Toda Colombia' if is_full_coverage else geo_method})*"
-    )
-with c_b2:
-    days_count = (date_end - date_start).days + 1
-    st.markdown(
-        f"**Periodo activo:** `{date_start}` al `{date_end}` (`{days_count:,}` días)  \n"
-        f"*(Línea base histórica calculada sobre el mismo ámbito geográfico)*"
-    )
-
-st.divider()
-
-# Caso sin resultados
-if len(df_filtered) == 0:
+if len(df_active_filtered) == 0:
     st.warning(
-        "⚠️ **Sin detecciones:** No se encontraron registros térmicos en las coordenadas y periodo seleccionados.  \n"
-        "Sugerencia: Amplíe el área geográfica en la barra lateral o extienda el rango de fechas."
+        "⚠️ **Sin detecciones:** No hay registros satelitales en las coordenadas y periodo seleccionados.  \n"
+        "Desplace el mapa o amplíe el rectángulo para explorar áreas activas."
     )
     st.stop()
 
-# ==========================================
-# Cómputo Analítico (Coherencia Sprint 3)
-# ==========================================
-baseline_years = [y for y in [2015, 2016, 2017, 2018, 2019] if y in df_region["year"].unique()]
-med_df_regional = historical_median(df_region, baseline_years=baseline_years)
-anomalies_df = compute_anomalies(df_filtered, median_df=med_df_regional)
-cal_matrix = calendar_matrix(df_filtered, all_years=sorted(df_filtered["year"].unique()))
+# Cálculos dinámicos en memoria
+baseline_yrs = [y for y in [2015, 2016, 2017, 2018, 2019] if y in df_active_region["year"].unique()]
+med_regional = historical_median(df_active_region, baseline_years=baseline_yrs)
+anom_dynamic = compute_anomalies(df_active_filtered, median_df=med_regional)
+cal_matrix = calendar_matrix(df_active_filtered, all_years=sorted(df_active_filtered["year"].unique()))
 
-# ==========================================
-# Indicadores Clave (KPI Cards)
-# ==========================================
+# KPIs Principales
 k1, k2, k3, k4 = st.columns(4)
+total_focos = len(df_active_filtered)
+pct_nat = (total_focos / len(df_raw)) * 100
+k1.metric("Focos en Zona Activa", f"{total_focos:,}", f"{pct_nat:.1f}% del total nacional")
 
-total_focos = len(df_filtered)
-k1.metric("Total Detecciones", f"{total_focos:,}")
-
-annual_sum = df_filtered.groupby("year").size()
-if not annual_sum.empty:
-    peak_year = annual_sum.idxmax()
-    k2.metric("Año de Mayor Actividad", f"{peak_year}", f"{annual_sum.max():,} focos")
+annual_counts = df_active_filtered.groupby("year").size()
+if not annual_counts.empty:
+    k2.metric("Año Pico", f"{annual_counts.idxmax()}", f"{annual_counts.max():,} focos")
 else:
-    k2.metric("Año de Mayor Actividad", "N/A")
+    k2.metric("Año Pico", "N/A")
 
-monthly_sum = monthly_counts(df_filtered).groupby("month_name")["count"].sum()
-if not monthly_sum.empty:
-    peak_month = monthly_sum.idxmax()
-    k3.metric("Mes de Mayor Actividad", f"{peak_month}", f"{monthly_sum.max():,} focos")
+month_counts = monthly_counts(df_active_filtered).groupby("month_name")["count"].sum()
+if not month_counts.empty:
+    k3.metric("Mes de Mayor Actividad", f"{month_counts.idxmax()}", f"{month_counts.max():,} focos")
 else:
     k3.metric("Mes de Mayor Actividad", "N/A")
 
-valid_anom = anomalies_df.dropna(subset=["anomaly_ratio"])
+valid_anom = anom_dynamic.dropna(subset=["anomaly_ratio"])
 if not valid_anom.empty:
-    last_row = valid_anom.iloc[-1]
-    last_label = last_row["anomaly_label"]
-    last_ratio_str = last_row["display_ratio"]
+    last_anom = valid_anom.iloc[-1]
     k4.metric(
-        f"Última Anomalía ({last_row['year_month']})",
-        last_ratio_str,
-        delta=f"Estado: {last_label}",
-        delta_color="inverse" if "alta" in last_label else "normal"
+        f"Última Anomalía ({last_anom['year_month']})",
+        last_anom["display_ratio"],
+        delta=f"Estado: {last_anom['anomaly_label']}",
+        delta_color="inverse" if "alta" in last_anom["anomaly_label"] else "normal"
     )
 else:
     k4.metric("Última Anomalía", "Sin ref. histórica")
 
-# ==========================================
-# Pestañas de Visualización Principal
-# ==========================================
-tab_cal, tab_anom, tab_geo, tab_export, tab_pipeline = st.tabs([
-    "📊 Calendario de Actividad (Heatmap)",
+# PESTAÑAS ANALÍTICAS SIN SALIR DEL GEOVISOR
+tab_cal, tab_anom, tab_hist, tab_exp, tab_pipe = st.tabs([
+    "📊 Calendario Anual (Heatmap)",
     "📈 Anomalías vs. Mediana Histórica",
-    "🗺️ Mapa e Inspección Espacial",
-    "💾 Exportación Segura de Datos",
-    "🔗 Flujo de Integración (Sprints 1–4)"
+    "📉 Distribución y Sensores",
+    "💾 Exportar CSV Filtrado",
+    "🔗 Integración de Sprints"
 ])
 
-# ------------------------------------------
-# Pestaña 1: Calendario Histórico Heatmap
-# ------------------------------------------
+# 1. Calendario Heatmap
 with tab_cal:
-    st.subheader("📊 Calendario Anual de Actividad de Fuego")
-    st.markdown(
-        "Frecuencia mensual de detecciones térmicas organizadas en cuadrícula cronológica (año × 12 meses). "
-        "Las celdas indican el número exacto de focos armonizados en la región seleccionada."
-    )
-
+    st.subheader("📊 Calendario Histórico de Actividad de Fuego en la Región Activa")
+    st.caption("Frecuencia mensual de detecciones en cuadrícula año × mes. Calculado en tiempo real según la zona delimitada.")
     if not cal_matrix.empty:
         fig_heat = go.Figure(
             data=go.Heatmap(
@@ -504,245 +495,118 @@ with tab_cal:
                 x=cal_matrix.columns.tolist(),
                 y=[f"Año {y}" for y in cal_matrix.index.tolist()],
                 colorscale=HEATMAP_COLORSCALE,
-                hovertemplate="<b>%{y} — Mes %{x}</b><br>Detecciones: %{z:,.0f} focos<extra></extra>",
-                colorbar=dict(
-                    title="Focos",
-                    thickness=16,
-                    len=0.9
-                )
+                hovertemplate="<b>%{y} — %{x}</b><br>Detecciones: %{z:,.0f} focos<extra></extra>",
+                colorbar=dict(title="Focos", thickness=15, len=0.85)
             )
         )
         fig_heat.update_layout(
-            height=max(320, len(cal_matrix) * 45),
-            margin=dict(l=40, r=40, t=50, b=40),
-            xaxis=dict(title="Mes del Año", side="top", tickfont=dict(size=12)),
-            yaxis=dict(title="Año", autorange="reversed", tickfont=dict(size=12)),
-            font=dict(family="Arial, sans-serif")
+            height=max(280, len(cal_matrix) * 40),
+            margin=dict(l=30, r=30, t=40, b=30),
+            xaxis=dict(title="Mes", side="top"),
+            yaxis=dict(title="Año", autorange="reversed")
         )
         st.plotly_chart(fig_heat, use_container_width=True)
 
-        st.caption(
-            f"Total acumulado en el calendario: {int(cal_matrix.values.sum()):,} focos armonizados. "
-            f"Año más activo en la selección: {cal_matrix.sum(axis=1).idxmax()} ({int(cal_matrix.sum(axis=1).max()):,} focos)."
-        )
-    else:
-        st.info("Sin datos para generar la matriz de calendario.")
-
-# ------------------------------------------
-# Pestaña 2: Anomalías vs. Mediana Histórica
-# ------------------------------------------
+# 2. Anomalías vs Mediana
 with tab_anom:
-    st.subheader("📈 Anomalías Mensuales frente a la Mediana Histórica Regional")
-    st.markdown(
-        "Comparación de las detecciones de cada período respecto a la mediana histórica del mismo mes en la región. "
-        "Permite identificar períodos excepcionalmente secos o activos."
-    )
-
+    st.subheader("📈 Anomalías Mensuales frente a la Mediana Histórica Territorial")
+    st.caption(f"Línea base calculada con los años {baseline_yrs} para exactamente la misma región seleccionada en el mapa.")
+    
     col_u1, col_u2, col_u3 = st.columns(3)
-    col_u1.markdown(f"🔴 **Alta:** Ratio ≥ `{ANOMALY_THRESHOLD_HIGH}x` (supera en 50% la mediana histórica)")
+    col_u1.markdown(f"🔴 **Alta:** Ratio ≥ `{ANOMALY_THRESHOLD_HIGH}x` (≥50% sobre mediana)")
     col_u2.markdown(f"🟢 **Normal:** Ratio entre `{ANOMALY_THRESHOLD_LOW}x` y `{ANOMALY_THRESHOLD_HIGH}x`")
-    col_u3.markdown(f"🔵 **Baja:** Ratio ≤ `{ANOMALY_THRESHOLD_LOW}x` (inferior a la mitad de la mediana)")
+    col_u3.markdown(f"🔵 **Baja:** Ratio ≤ `{ANOMALY_THRESHOLD_LOW}x` (≤50% de mediana)")
 
-    if not anomalies_df.empty and not anomalies_df["anomaly_ratio"].dropna().empty:
+    if not anom_dynamic.empty and not anom_dynamic["anomaly_ratio"].dropna().empty:
         fig_bar = px.bar(
-            anomalies_df,
+            anom_dynamic,
             x="year_month",
             y="anomaly_ratio",
             color="anomaly_label",
             color_discrete_map=ANOMALY_COLOR_MAP,
-            labels={
-                "year_month": "Período (Año-Mes)",
-                "anomaly_ratio": "Ratio vs. Mediana Histórica",
-                "anomaly_label": "Clasificación"
-            },
-            hover_data={
-                "count": ":,.0f",
-                "median_historical": ":,.1f",
-                "display_ratio": True,
-                "anomaly_ratio": False
-            }
+            labels={"year_month": "Periodo", "anomaly_ratio": "Ratio vs. Mediana", "anomaly_label": "Clasificación"},
+            hover_data={"count": ":,.0f", "median_historical": ":,.1f", "display_ratio": True, "anomaly_ratio": False}
         )
-
-        fig_bar.add_hline(
-            y=1.0,
-            line_dash="dash",
-            line_color="#424242",
-            line_width=2,
-            annotation_text="Mediana Histórica (1.0x)",
-            annotation_position="top left"
-        )
-
+        fig_bar.add_hline(y=1.0, line_dash="dash", line_color="#333", annotation_text="Mediana Histórica (1.0x)")
         fig_bar.update_layout(
-            height=390,
-            margin=dict(l=40, r=40, t=30, b=60),
+            height=340,
+            margin=dict(l=30, r=30, t=30, b=50),
             xaxis_tickangle=-45,
-            xaxis_title="Año - Mes",
-            yaxis_title="Ratio de Anomalía",
-            legend_title_text="Anomalía",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
-        with st.expander("🔍 Ver tabla de datos de anomalías y medianas de referencia"):
-            st.dataframe(
-                anomalies_df[[
-                    "year_month", "count", "median_historical", "n_years", "display_ratio", "anomaly_label"
-                ]].rename(columns={
-                    "year_month": "Periodo",
-                    "count": "Detecciones",
-                    "median_historical": "Mediana Histórica",
-                    "n_years": "Años Referencia",
-                    "display_ratio": "Ratio",
-                    "anomaly_label": "Categoría"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-    else:
-        st.info("No hay suficientes registros históricos para calcular anomalías en la selección activa.")
+# 3. Distribución Temporal y Sensores
+with tab_hist:
+    st.subheader("📉 Análisis de Sensores y Frecuencia Temporal")
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        st.markdown("**Comparativa de Sensores Satelitales en la Zona:**")
+        fig_pie = px.pie(
+            df_active_filtered,
+            names="source",
+            title="Proporción MODIS vs. VIIRS S-NPP",
+            color="source",
+            color_discrete_map={"viirs-snpp": "#D32F2F", "modis": "#FB8C00"},
+            hole=0.4
+        )
+        fig_pie.update_layout(height=280, margin=dict(l=20, r=20, t=40, b=20))
+        st.plotly_chart(fig_pie, use_container_width=True)
+    with col_h2:
+        st.markdown("**Niveles de Confianza Armonizados:**")
+        fig_conf = px.bar(
+            df_active_filtered["confidence_level"].value_counts().reset_index(),
+            x="confidence_level",
+            y="count",
+            color="confidence_level",
+            color_discrete_map={"nominal": "#2E7D32", "high": "#1565C0"},
+            labels={"confidence_level": "Nivel de Confianza", "count": "Detecciones"}
+        )
+        fig_conf.update_layout(height=280, margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
+        st.plotly_chart(fig_conf, use_container_width=True)
 
-# ------------------------------------------
-# Pestaña 3: Inspección Geoespacial
-# ------------------------------------------
-with tab_geo:
-    st.subheader("🗺️ Área de Consulta e Inspección Espacial")
-    st.markdown(
-        f"Límites geográficos activos: `[{active_lat_min:.2f}°, {active_lat_max:.2f}° N]`, "
-        f"`[{active_lon_min:.2f}°, {active_lon_max:.2f}° O]`."
-    )
-
-    center_lat = (active_lat_min + active_lat_max) / 2
-    center_lon = (active_lon_min + active_lon_max) / 2
-    m_main = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles="OpenStreetMap")
-
-    folium.Rectangle(
-        bounds=[[active_lat_min, active_lon_min], [active_lat_max, active_lon_max]],
-        color="#D32F2F",
-        weight=3,
-        fill=True,
-        fill_color="#FF8A80",
-        fill_opacity=0.15,
-        popup=f"Área activa: {len(df_filtered):,} focos",
-        tooltip="Bounding Box de consulta activo"
-    ).add_to(m_main)
-
-    MAX_MAP_POINTS = 500
-    if len(df_filtered) > MAX_MAP_POINTS:
-        sample_df = df_filtered.sample(n=MAX_MAP_POINTS, random_state=42)
-        st.caption(f"Mostrando una muestra representativa de {MAX_MAP_POINTS} detecciones de las {len(df_filtered):,} totales.")
-    else:
-        sample_df = df_filtered
-
-    for _, pt in sample_df.iterrows():
-        color_pt = "#D32F2F" if str(pt.get("source")) == "viirs-snpp" else "#FF9800"
-        folium.CircleMarker(
-            location=[float(pt["latitude"]), float(pt["longitude"])],
-            radius=3,
-            color=color_pt,
-            fill=True,
-            fill_color=color_pt,
-            fill_opacity=0.7,
-            popup=(
-                f"<b>{pt['source']}</b><br>"
-                f"Fecha: {pt['timestamp']}<br>"
-                f"Confianza: {pt.get('confidence_level', 'N/A')}<br>"
-                f"FRP: {pt.get('frp', 0.0)} MW"
-            )
-        ).add_to(m_main)
-
-    st_folium(m_main, height=480, use_container_width=True, key="folium_main_preview")
-
-    c_s1, c_s2 = st.columns(2)
-    with c_s1:
-        st.markdown("**Distribución por Sensor Satelital:**")
-        st.dataframe(df_filtered["source"].value_counts().reset_index().rename(
-            columns={"source": "Sensor", "count": "Detecciones"}
-        ), use_container_width=True, hide_index=True)
-    with c_s2:
-        st.markdown("**Distribución por Nivel de Confianza Armonizado:**")
-        st.dataframe(df_filtered["confidence_level"].value_counts().reset_index().rename(
-            columns={"confidence_level": "Nivel Confianza", "count": "Detecciones"}
-        ), use_container_width=True, hide_index=True)
-
-# ------------------------------------------
-# Pestaña 4: Exportación Segura de Datos
-# ------------------------------------------
-with tab_export:
-    st.subheader("💾 Exportación de Resultados Filtrados")
-    st.markdown(
-        "Descargue el conjunto exacto de observaciones que coinciden con los filtros geográficos y temporales activos.  \n"
-        "**Protección de seguridad:** Se aplica sanitización contra *CSV Injection* para prevenir la ejecución de fórmulas "
-        "al abrir el archivo en hojas de cálculo (Excel, LibreOffice)."
-    )
-
-    export_cols = [
-        "latitude", "longitude", "acq_date", "acq_time", "timestamp",
-        "satellite", "instrument", "source", "confidence_level", "frp", "daynight"
-    ]
-    available_export_cols = [c for c in export_cols if c in df_filtered.columns]
-
-    df_export_safe = sanitize_for_csv(df_filtered, columns=available_export_cols)
-
-    st.markdown(f"**Vista previa de los primeros 10 registros (de {len(df_export_safe):,} totales):**")
-    st.dataframe(df_export_safe.head(10), use_container_width=True, hide_index=True)
-
-    csv_bytes = df_export_safe.to_csv(index=False).encode("utf-8")
-    filename = (
-        f"focos_armonizados_lat_{active_lat_min:.2f}_{active_lat_max:.2f}_"
-        f"lon_{active_lon_min:.2f}_{active_lon_max:.2f}_{date_start}_{date_end}.csv"
-    )
-
+# 4. Exportación CSV
+with tab_exp:
+    st.subheader("💾 Exportación de la Selección Territorial")
+    st.caption("Descarga únicamente los registros que coinciden con los límites del geovisor y fechas activas.")
+    
+    export_cols = ["latitude", "longitude", "acq_date", "acq_time", "timestamp", "satellite", "instrument", "source", "confidence_level", "frp", "daynight"]
+    safe_cols = [c for c in export_cols if c in df_active_filtered.columns]
+    df_exp = sanitize_for_csv(df_active_filtered, columns=safe_cols)
+    
+    st.dataframe(df_exp.head(10), use_container_width=True, hide_index=True)
+    
+    csv_bytes = df_exp.to_csv(index=False).encode("utf-8")
+    fname = f"geovisor_focos_{active_s:.2f}_{active_n:.2f}_{active_w:.2f}_{active_e:.2f}_{date_start}_{date_end}.csv"
     st.download_button(
-        label=f"📥 Descargar CSV ({len(df_export_safe):,} registros, ~{len(csv_bytes) / 1024:.1f} KB)",
+        f"📥 Descargar CSV ({len(df_exp):,} registros, ~{len(csv_bytes)/1024:.1f} KB)",
         data=csv_bytes,
-        file_name=filename,
+        file_name=fname,
         mime="text/csv",
         type="primary"
     )
 
-# ------------------------------------------
-# Pestaña 5: Flujo de Integración (Sprints 1–4)
-# ------------------------------------------
-with tab_pipeline:
-    st.subheader("🔗 Arquitectura de Integración de Sprints")
-    st.markdown(
-        "Conexión del flujo de datos solicitada por la profesora:  \n"
-        "`Selección de Región (Sprint 4) → Ingesta (Sprint 1) → Armonización (Sprint 2) → Analítica (Sprint 3) → Visor (Sprint 4)`"
-    )
-
-    st.markdown("#### Estado Actual de los Módulos en el Repositorio:")
-    status_table = []
-    for mod_key, info in modules_status.items():
-        status_table.append({
-            "Módulo": info["expected_file"],
-            "Ruta": str(info["path"].name),
-            "Tamaño": f"{info['size_bytes']} bytes",
-            "Estado": "🟢 Operativo" if info["has_required_interface"] else ("🟡 Archivo Vacío (0 B)" if info["size_bytes"] == 0 else "🔴 Sin interfaz parametrizada"),
-            "Diagnóstico": info["details"]
+# 5. Integración de Sprints
+with tab_pipe:
+    st.subheader("🔗 Orquestación de Sprints (1 → 2 → 3 → 4)")
+    st.markdown("Verificación técnica de los módulos en `src/` conectados con el geovisor:")
+    mod_st = check_pipeline_modules()
+    st_table = []
+    for k, v in mod_st.items():
+        st_table.append({
+            "Módulo": v["expected_file"],
+            "Ruta": str(v["path"].name),
+            "Tamaño": f"{v['size_bytes']} bytes",
+            "Estado": "🟢 Operativo" if v["has_required_interface"] else ("🟡 Archivo Vacío (0 B)" if v["size_bytes"] == 0 else "🔴 Sin interfaz BBox"),
+            "Diagnóstico": v["details"]
         })
-    st.dataframe(pd.DataFrame(status_table), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(st_table), use_container_width=True, hide_index=True)
 
-    st.markdown("#### Contratos Técnicos de Integración:")
-    st.caption("Especificación que deben satisfacer los scripts de los compañeros para conectarse a la llamada dinámica:")
-    contracts = get_required_contracts_doc()
-    for s_key, c_info in contracts.items():
-        with st.expander(f"📌 {c_info['responsable']} — {c_info['modulo']}"):
-            st.markdown(f"**Firma de función requerida:**")
-            st.code(c_info["firma_requerida"], language="python")
-            st.markdown(f"**Parámetros:**")
-            for param, desc in c_info["parametros"].items():
-                st.markdown(f"- `{param}`: {desc}")
-            st.markdown(f"**Salidas esperadas:**")
-            for out in c_info["salidas_esperadas"]:
-                st.markdown(f"- `{out}`")
-            st.markdown(f"**Regla metodológica:** {c_info['regla_cientifica']}")
+    with st.expander("Ver Contratos Técnicos para Ingesta y Armonización Dinámica"):
+        st.json(get_required_contracts_doc())
 
-# ==========================================
-# Pie de página y trazabilidad
-# ==========================================
 st.divider()
 st.caption(
-    "🔥 NASA FIRMS Harmonized Fire Activity Calendar | Sprint 4 MVP | "
-    "Sensores: Terra/Aqua (MODIS 1km) y Suomi-NPP (VIIRS 375m) | "
-    "Flujo integrado con adaptador de pipeline para Sprints 1–3."
+    "🛰️ NASA Space Apps Challenge 2026 | Harmonization of MODIS & VIIRS Hot Spots | "
+    "Sprint 4: Geovisor interactivo de respuesta en tiempo real. Cobertura: Colombia 2015–2020."
 )

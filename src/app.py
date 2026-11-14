@@ -1,8 +1,8 @@
 """
 Aplicación Web MVP - Calendario Armonizado de Actividad de Incendios
 NASA Space Apps Challenge 2026 - Harmonization of MODIS and VIIRS Hot Spots
-Sprint 4: Interfaz de usuario interactiva, analítica geoespacial y exportación segura.
-Preparada para despliegue en Streamlit Community Cloud y redes locales.
+Sprint 4: Interfaz de usuario interactiva, analítica geoespacial, exportación segura
+y orquestador de integración con los Sprints 1, 2 y 3.
 """
 
 from pathlib import Path
@@ -18,7 +18,7 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from shapely.geometry import shape
 
-# Asegurar que el directorio src esté en sys.path independientemente de cómo se invoque
+# Asegurar que el directorio src esté en sys.path
 SRC_DIR = Path(__file__).resolve().parent
 BASE_DIR = SRC_DIR.parent
 if str(SRC_DIR) not in sys.path:
@@ -38,6 +38,14 @@ from analytics_core import (
     NOMBRES_MESES,
     ANOMALY_THRESHOLD_HIGH,
     ANOMALY_THRESHOLD_LOW,
+)
+
+from pipeline_adapter import (
+    check_pipeline_modules,
+    request_pipeline_execution,
+    get_required_contracts_doc,
+    is_bbox_covered_by_colombia,
+    BBOX_COLOMBIA_COBERTURA,
 )
 
 # --- Configuración de rutas de datos ---
@@ -73,16 +81,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Carga de datos de bajo consumo de memoria (RAM Optimized) ---
+# --- Carga de datos optimizada en RAM ---
 @st.cache_data(show_spinner=False)
 def load_harmonized_data():
     """
-    Carga el dataset armonizado optimizando tipos de datos para reducir el uso de RAM
-    en entornos de nube (Streamlit Community Cloud). Reduce el consumo de ~90MB a ~29MB.
+    Carga el dataset armonizado nacional optimizando tipos de datos.
     """
     csv_path = HARMONIZED_DIR / "incendios_armonizados.csv"
     if not csv_path.exists():
-        return None, f"No se encontró el archivo de datos en: data/harmonized/incendios_armonizados.csv"
+        return None, "No se encontró el archivo de datos en: data/harmonized/incendios_armonizados.csv"
 
     dtypes = {
         "latitude": "float32",
@@ -107,7 +114,7 @@ def load_harmonized_data():
         df["month_name"] = df["month"].map(MESES_ES).astype("category")
         df["year_month"] = df["timestamp"].dt.to_period("M").astype(str)
         return df, ""
-    except Exception as e:
+    except Exception:
         return None, "Error interno al leer el archivo de datos armonizados."
 
 
@@ -137,7 +144,7 @@ if df_raw is None or df_raw.empty:
     st.info("Verifique que data/harmonized/incendios_armonizados.csv esté presente.")
     st.stop()
 
-# Límites nacionales del dataset
+# Límites del dataset nacional
 ds_lat_min, ds_lat_max = float(df_raw["latitude"].min()), float(df_raw["latitude"].max())
 ds_lon_min, ds_lon_max = float(df_raw["longitude"].min()), float(df_raw["longitude"].max())
 ds_min_date = df_raw["timestamp"].min().date()
@@ -159,7 +166,23 @@ if "lon_max" not in st.session_state:
 # Barra lateral: Configuración y Filtros
 # ==========================================
 st.sidebar.title("🔥 Control de Consulta")
-st.sidebar.caption("Filtros espaciotemporales de la serie armonizada")
+st.sidebar.caption("Filtros espaciotemporales y Pipeline de Procesamiento")
+
+# Estado de los módulos del Pipeline
+modules_status = check_pipeline_modules()
+
+with st.sidebar.expander("🔗 Estado del Pipeline (Sprints 1–3)", expanded=False):
+    s1_ok = modules_status["ingest"]["status"] == "present" and modules_status["ingest"]["has_required_interface"]
+    s2_ok = modules_status["harmonize"]["status"] == "present" and modules_status["harmonize"]["has_required_interface"]
+    s3_ok = modules_status["analytics"]["status"] == "present" and modules_status["analytics"]["has_required_interface"]
+
+    st.markdown(f"**Sprint 1 (Ingesta):** {'🟢 Listo' if s1_ok else '🟡 Pendiente (0 B)'}")
+    st.caption(modules_status["ingest"]["details"])
+    st.markdown(f"**Sprint 2 (Armonización):** {'🟢 Listo' if s2_ok else '🟡 Pendiente (0 B)'}")
+    st.caption(modules_status["harmonize"]["details"])
+    st.markdown(f"**Sprint 3 (Analítica):** {'🟢 Listo' if s3_ok else '🟡 Pendiente (0 B)'}")
+    st.caption(modules_status["analytics"]["details"])
+    st.markdown("**Sprint 4 (Visualizador Web):** 🟢 Operativo")
 
 # 1. Selección Geográfica
 st.sidebar.subheader("📍 1. Selección Geográfica")
@@ -183,7 +206,7 @@ if geo_method == "Región Predefinida":
     st.session_state["lon_max"] = min(ds_lon_max, p_e)
 
 elif geo_method == "Dibujar en Mapa":
-    st.sidebar.caption("Trace un rectángulo en el visor inferior para definir la zona:")
+    st.sidebar.caption("Trace un rectángulo en el visor para capturar las coordenadas:")
     center_lat = (st.session_state["lat_min"] + st.session_state["lat_max"]) / 2
     center_lon = (st.session_state["lon_min"] + st.session_state["lon_max"]) / 2
 
@@ -293,10 +316,75 @@ selected_confidences = st.sidebar.multiselect(
     default=sorted(df_raw["confidence_level"].unique())
 )
 
+# Botón de confirmación para procesar
+btn_confirmar = st.sidebar.button("⚡ Procesar / Actualizar Área", type="primary", use_container_width=True)
+
 # ==========================================
-# Filtrado de Datos
+# Orquestación del Pipeline (Sprints 1 → 2 → 3 → 4)
 # ==========================================
-# Filtrar espacialmente la región (se usa para la mediana histórica regional)
+pipeline_result = request_pipeline_execution(active_bbox, date_start, date_end)
+
+# ==========================================
+# Encabezado Principal y Avisos Metodológicos
+# ==========================================
+st.title("🔥 Calendario Armonizado de Actividad de Incendios")
+st.markdown(
+    "**NASA Space Apps Challenge 2026** — *Harmonization of MODIS and VIIRS Hot Spots*  \n"
+    "Sistema integrado: Ingesta (Sprint 1) → Armonización (Sprint 2) → Analítica (Sprint 3) → Visualización (Sprint 4)."
+)
+
+# Identificación clara del dataset
+st.caption(
+    "📌 **Dataset Activo:** Serie histórica cerrada 2015–2020 | Cobertura: Colombia | "
+    "Sensores: MODIS (Terra/Aqua 1 km) y VIIRS (Suomi-NPP 375 m) | NASA FIRMS"
+)
+
+# Aviso metodológico NASA
+st.info(
+    "🛰️ **Aviso científico NASA FIRMS:** Las cifras corresponden a **detecciones térmicas satelitales "
+    "(focos de calor / hot spots)** armonizadas a nivel de píxel y deduplicadas espaciotemporalmente (1 km, 3 h). "
+    "No deben interpretarse directamente como incendios individuales en tierra.",
+    icon="ℹ️"
+)
+
+# Verificación de cobertura geográfica
+if not pipeline_result["can_visualize"]:
+    # El usuario seleccionó una región fuera de Colombia que requiere ejecutar los Sprints 1, 2 y 3
+    st.warning("⚠️ **Atención: Área fuera de la cobertura precalculada de Colombia**")
+    st.markdown(
+        f"Ha seleccionado una región geográfica externa: `Lat: [{active_lat_min:.2f}°, {active_lat_max:.2f}°]`, "
+        f"`Lon: [{active_lon_min:.2f}°, {active_lon_max:.2f}°]`."
+    )
+    st.error(
+        "**Requisito de la profesora:** Para procesar una nueva área fuera del dataset nacional, "
+        "el sistema debe ejecutar secuencialmente:  \n"
+        "1. Ingesta (`ingest.py`) desde NASA FIRMS.  \n"
+        "2. Armonización (`harmonize.py`) MODIS ↔ VIIRS.  \n"
+        "3. Analítica (`analytics.py`) para agregaciones y anomalías.  \n\n"
+        "**Estado actual:** Los scripts de los compañeros se encuentran actualmente **pendientes o con archivos vacíos (0 bytes)**."
+    )
+
+    with st.expander("📋 Ver contratos técnicos pendientes que deben implementar los otros integrantes", expanded=True):
+        contracts = get_required_contracts_doc()
+        for s_key, c_info in contracts.items():
+            st.markdown(f"### {c_info['responsable']} (`{c_info['modulo']}`)")
+            st.code(c_info["firma_requerida"], language="python")
+            st.markdown(f"- **Salidas esperadas:** `{', '.join(c_info['salidas_esperadas'])}`")
+            st.markdown(f"- **Regla científica:** {c_info['regla_cientifica']}")
+            st.divider()
+
+    st.info("💡 **Solución:** Utilice una región dentro de la cobertura de Colombia (2015–2020) para explorar el visor funcional.")
+    if st.button("⬅️ Restablecer a Toda Colombia"):
+        st.session_state["lat_min"] = ds_lat_min
+        st.session_state["lat_max"] = ds_lat_max
+        st.session_state["lon_min"] = ds_lon_min
+        st.session_state["lon_max"] = ds_lon_max
+        st.rerun()
+    st.stop()
+
+# ==========================================
+# Filtrado de Datos en Memoria (Cobertura Activa)
+# ==========================================
 df_region = filter_bbox(df_raw, active_bbox)
 
 if selected_sources:
@@ -304,7 +392,6 @@ if selected_sources:
 if selected_confidences:
     df_region = df_region[df_region["confidence_level"].isin(selected_confidences)]
 
-# Filtrar temporalmente según la ventana de consulta activa
 df_filtered = filter_dates(df_region, date_start, date_end)
 
 # Indicador de conteo en la barra lateral
@@ -314,30 +401,6 @@ st.sidebar.metric(
     "Detecciones en consulta",
     f"{len(df_filtered):,}",
     delta=f"{pct_total:.1f}% del total nacional"
-)
-
-# ==========================================
-# Encabezado Principal y Avisos Metodológicos
-# ==========================================
-st.title("🔥 Calendario Armonizado de Actividad de Incendios")
-st.markdown(
-    "**NASA Space Apps Challenge 2026** — *Harmonization of MODIS and VIIRS Hot Spots*  \n"
-    "Herramienta de análisis geoespacial para la visualización de patrones históricos de fuego en Colombia."
-)
-
-# Identificación clara del dataset (evitar confusión con tiempo real)
-st.caption(
-    "📌 **Dataset:** Serie histórica cerrada 2015–2020 | Cobertura: Colombia | "
-    "Sensores: MODIS (Terra/Aqua 1 km) y VIIRS (Suomi-NPP 375 m) | NASA FIRMS"
-)
-
-# Aviso metodológico NASA
-st.info(
-    "🛰️ **Aviso científico NASA FIRMS:** Las cifras corresponden a **detecciones térmicas satelitales "
-    "(focos de calor / hot spots)** armonizadas a nivel de píxel y deduplicadas espaciotemporalmente (1 km, 3 h). "
-    "No deben interpretarse directamente como incendios individuales en tierra, pues un evento de fuego extenso "
-    "puede generar múltiples detecciones satelitales.",
-    icon="ℹ️"
 )
 
 # Badge de consulta activa
@@ -356,7 +419,7 @@ with c_b2:
     days_count = (date_end - date_start).days + 1
     st.markdown(
         f"**Periodo activo:** `{date_start}` al `{date_end}` (`{days_count:,}` días)  \n"
-        f"*(Línea base de comparación histórica calculada sobre el mismo ámbito geográfico)*"
+        f"*(Línea base histórica calculada sobre el mismo ámbito geográfico)*"
     )
 
 st.divider()
@@ -372,7 +435,6 @@ if len(df_filtered) == 0:
 # ==========================================
 # Cómputo Analítico (Coherencia Sprint 3)
 # ==========================================
-# Mediana histórica calculada dinámicamente sobre la región seleccionada (años 2015-2019)
 baseline_years = [y for y in [2015, 2016, 2017, 2018, 2019] if y in df_region["year"].unique()]
 med_df_regional = historical_median(df_region, baseline_years=baseline_years)
 anomalies_df = compute_anomalies(df_filtered, median_df=med_df_regional)
@@ -400,7 +462,6 @@ if not monthly_sum.empty:
 else:
     k3.metric("Mes de Mayor Actividad", "N/A")
 
-# Última anomalía disponible en la ventana analizada
 valid_anom = anomalies_df.dropna(subset=["anomaly_ratio"])
 if not valid_anom.empty:
     last_row = valid_anom.iloc[-1]
@@ -418,11 +479,12 @@ else:
 # ==========================================
 # Pestañas de Visualización Principal
 # ==========================================
-tab_cal, tab_anom, tab_geo, tab_export = st.tabs([
+tab_cal, tab_anom, tab_geo, tab_export, tab_pipeline = st.tabs([
     "📊 Calendario de Actividad (Heatmap)",
     "📈 Anomalías vs. Mediana Histórica",
     "🗺️ Mapa e Inspección Espacial",
-    "💾 Exportación Segura de Datos"
+    "💾 Exportación Segura de Datos",
+    "🔗 Flujo de Integración (Sprints 1–4)"
 ])
 
 # ------------------------------------------
@@ -564,7 +626,6 @@ with tab_geo:
         tooltip="Bounding Box de consulta activo"
     ).add_to(m_main)
 
-    # Para no sobrecargar el navegador, renderizar una muestra representativa de puntos
     MAX_MAP_POINTS = 500
     if len(df_filtered) > MAX_MAP_POINTS:
         sample_df = df_filtered.sample(n=MAX_MAP_POINTS, random_state=42)
@@ -639,6 +700,43 @@ with tab_export:
         type="primary"
     )
 
+# ------------------------------------------
+# Pestaña 5: Flujo de Integración (Sprints 1–4)
+# ------------------------------------------
+with tab_pipeline:
+    st.subheader("🔗 Arquitectura de Integración de Sprints")
+    st.markdown(
+        "Conexión del flujo de datos solicitada por la profesora:  \n"
+        "`Selección de Región (Sprint 4) → Ingesta (Sprint 1) → Armonización (Sprint 2) → Analítica (Sprint 3) → Visor (Sprint 4)`"
+    )
+
+    st.markdown("#### Estado Actual de los Módulos en el Repositorio:")
+    status_table = []
+    for mod_key, info in modules_status.items():
+        status_table.append({
+            "Módulo": info["expected_file"],
+            "Ruta": str(info["path"].name),
+            "Tamaño": f"{info['size_bytes']} bytes",
+            "Estado": "🟢 Operativo" if info["has_required_interface"] else ("🟡 Archivo Vacío (0 B)" if info["size_bytes"] == 0 else "🔴 Sin interfaz parametrizada"),
+            "Diagnóstico": info["details"]
+        })
+    st.dataframe(pd.DataFrame(status_table), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Contratos Técnicos de Integración:")
+    st.caption("Especificación que deben satisfacer los scripts de los compañeros para conectarse a la llamada dinámica:")
+    contracts = get_required_contracts_doc()
+    for s_key, c_info in contracts.items():
+        with st.expander(f"📌 {c_info['responsable']} — {c_info['modulo']}"):
+            st.markdown(f"**Firma de función requerida:**")
+            st.code(c_info["firma_requerida"], language="python")
+            st.markdown(f"**Parámetros:**")
+            for param, desc in c_info["parametros"].items():
+                st.markdown(f"- `{param}`: {desc}")
+            st.markdown(f"**Salidas esperadas:**")
+            for out in c_info["salidas_esperadas"]:
+                st.markdown(f"- `{out}`")
+            st.markdown(f"**Regla metodológica:** {c_info['regla_cientifica']}")
+
 # ==========================================
 # Pie de página y trazabilidad
 # ==========================================
@@ -646,5 +744,5 @@ st.divider()
 st.caption(
     "🔥 NASA FIRMS Harmonized Fire Activity Calendar | Sprint 4 MVP | "
     "Sensores: Terra/Aqua (MODIS 1km) y Suomi-NPP (VIIRS 375m) | "
-    "Diseñado para despliegue en Streamlit Community Cloud."
+    "Flujo integrado con adaptador de pipeline para Sprints 1–3."
 )

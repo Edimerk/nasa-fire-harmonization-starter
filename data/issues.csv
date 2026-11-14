@@ -1,0 +1,11 @@
+Issue,Titulo,Responsable sugerido,Prioridad,Dependencia,Criterio de aceptación
+HACK-01,"Verificar esquema, licencias y disponibilidad FIRMS",Investigación + Datos,P0,-,Muestras y columnas reales documentadas
+HACK-02,"Crear y proteger repositorio, ramas y tablero",Integración,P0,-,main y develop operativas; issues asignadas
+HACK-03,Implementar ingesta reproducible con fixtures,Datos,P0,HACK-01,CSV por sensor con trazabilidad y tests
+HACK-04,Prototipar y evaluar armonización en solapamiento,Datos + Investigación,P0,HACK-03,Método reproducible con límites documentados
+HACK-05,Implementar agregaciones y mediana histórica,Datos,P0,HACK-04,"Test de meses faltantes, ceros y agregaciones"
+HACK-06,Crear selección de región y fechas,App,P0,HACK-03,Filtros y estado vacío demostrables
+HACK-07,"Crear mapa, calendario y anomalías",App,P0,HACK-05;HACK-06,Visualizaciones conectadas a datos verificables
+HACK-08,Exportación CSV filtrado,App,P1,HACK-06,CSV coincide con selección activa
+HACK-09,Validación científica y funcional,Investigación + Integración,P0,HACK-04;HACK-07,Pruebas y limitaciones documentadas
+HACK-10,README final y demo oficial,Integración + Investigación,P0,HACK-07;HACK-09,Enlaces públicos y entrega formal confirmada

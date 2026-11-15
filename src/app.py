@@ -49,6 +49,7 @@ from analytics_core import (
 )
 
 from temporal_play import render_player
+from period_anomalies import render_period_anomalies
 from activity_zones import render_activity_zones
 
 from pipeline_adapter import (
@@ -798,7 +799,7 @@ if show_side_panel and col_panel is not None:
                         st.plotly_chart(fig, width="stretch")
                     st.caption("Solo se representan los meses incluidos en la consulta; el resto no tiene cobertura confirmada.")
                 with t_anom:
-                    st.info("Anomalías no disponibles: esta consulta no incluye una referencia histórica multianual con cobertura verificada. No se calculan anomalías a partir de pocos días.")
+                    render_period_anomalies(df_active_filtered, date_start, date_end)
                 with t_tend:
                     dias = (df_active_filtered.groupby(df_active_filtered["timestamp"].dt.date)
                             .size().rename("Detecciones").reset_index())
@@ -899,6 +900,8 @@ if show_side_panel and col_panel is not None:
 
             # 2. Anomalías vs Mediana
             with t_anom:
+                with st.expander("Variaciones dentro del periodo seleccionado"):
+                    render_period_anomalies(df_active_filtered, date_start, date_end)
                 st.caption(f"Comparación vs mediana histórica (años {baseline_yrs}):")
                 if not anom_df.empty and not anom_df["anomaly_ratio"].dropna().empty:
                     fig_a = px.bar(

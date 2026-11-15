@@ -49,6 +49,7 @@ from analytics_core import (
 )
 
 from temporal_play import render_player
+from activity_zones import render_activity_zones
 
 from pipeline_adapter import (
     request_pipeline_execution, request_ingest_preview, request_full_pipeline,
@@ -772,8 +773,8 @@ if show_side_panel and col_panel is not None:
                 m2.metric("Sensores con registros", str(len(counts_sensor)))
                 m3.metric("Días con detecciones", str(df_active_filtered["timestamp"].dt.date.nunique()))
 
-                t_cal, t_anom, t_tend, t_sens, t_exp, t_play = st.tabs([
-                    "📊 Calendario", "📈 Anomalías", "📉 Tendencia", "🛰️ Sensores", "💾 Exportar", "▶️ Evolución"])
+                t_cal, t_anom, t_tend, t_sens, t_exp, t_play, t_zonas = st.tabs([
+                    "📊 Calendario", "📈 Anomalías", "📉 Tendencia", "🛰️ Sensores", "💾 Exportar", "▶️ Evolución", "🧭 Zonas"])
                 with t_cal:
                     mensual = (df_active_filtered.assign(
                         año=df_active_filtered["timestamp"].dt.year,
@@ -824,6 +825,8 @@ if show_side_panel and col_panel is not None:
                     st.caption("Los archivos y resúmenes analíticos de la consulta se conservan en data/queries/.")
                 with t_play:
                     render_player(df_active_filtered, (bw, bs, be, bn), date_start, date_end)
+                with t_zonas:
+                    render_activity_zones(df_active_filtered, (bw, bs, be, bn))
         elif preview_mode:
             st.warning("Vista preliminar NASA FIRMS: detecciones sin armonizar ni deduplicar. No representan las estadísticas finales.")
             st.metric("Detecciones recibidas y filtradas", f"{len(df_active_filtered):,}")
@@ -864,12 +867,12 @@ if show_side_panel and col_panel is not None:
             cal_df = calendar_matrix(df_active_filtered, all_years=sorted(df_active_filtered["year"].unique()))
 
             # Pestañas analíticas compactas dentro del panel
-            t_cal, t_anom, t_tend, t_sens, t_exp, t_play = st.tabs([
+            t_cal, t_anom, t_tend, t_sens, t_exp, t_play, t_zonas = st.tabs([
                 "📊 Calendario",
                 "📈 Anomalías",
                 "📉 Tendencia",
                 "🛰️ Sensores",
-                "💾 Exportar", "▶️ Evolución"])
+                "💾 Exportar", "▶️ Evolución", "🧭 Zonas"])
 
             # 1. Calendario Heatmap
             with t_cal:
@@ -983,3 +986,5 @@ if show_side_panel and col_panel is not None:
             # Animación de detecciones de Colombia precalculadas.
             with t_play:
                 render_player(df_active_filtered, (bw, bs, be, bn), date_start, date_end)
+            with t_zonas:
+                render_activity_zones(df_active_filtered, (bw, bs, be, bn))

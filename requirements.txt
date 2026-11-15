@@ -19,3 +19,7 @@ plotly>=5.24.0
 pandas>=2.2.0
 numpy>=2.0.0
 scipy>=1.15,<2
+
+# Consultas NASA FIRMS (ingesta)
+firms-client>=0.4,<0.6
+httpx>=0.27,<1

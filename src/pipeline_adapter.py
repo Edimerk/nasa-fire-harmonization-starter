@@ -318,47 +318,48 @@ def request_pipeline_execution(
 
 # Integración provisional Sprint 1: muestra detecciones SIN armonizar.
 def request_ingest_preview(bbox, date_start, date_end):
-    """Descarga por BBOX usando los módulos ya probados. No simula Sprints 2/3."""
+    """NASA FIRMS: ingesta controlada, sin modificar los Sprints 2 ni 3.
+
+    Consultas históricas de hasta 93 días mediante bloques cacheados de 5.
+    Consultas recientes conservan el máximo inicial de 5 días.
+    """
     val_geo, msg_geo = validate_coordinates(bbox[1], bbox[3], bbox[0], bbox[2])
     val_dt, msg_dt = validate_dates(date_start, date_end)
     if not val_geo or not val_dt:
         return {"success": False, "message": msg_geo if not val_geo else msg_dt}
-
     try:
-        # Prueba aislada: SP para periodos antiguos, NRT para recientes.
-        # Los periodos mixtos SP/NRT se integrarán posteriormente.
         antiguo = date_end < datetime.date.today() - datetime.timedelta(days=120)
         dias = (date_end - date_start).days + 1
-        limite = 31 if antiguo else 5
-        if dias > limite:
-            return {
-                "success": False,
-                "message": (
-                    f"Para esta vista preliminar selecciona máximo {limite} días "
-                    f"(seleccionados: {dias}). El historial completo se habilitará "
-                    "con la integración de los siguientes sprints."
-                ),
-            }
         if antiguo:
-            from ingest_historico import ejecutar as ejecutar_historico
-            resultado = ejecutar_historico(bbox, date_start, date_end)
+            from historical_batches import descargar_historico_por_bloques
+            resultado = descargar_historico_por_bloques(tuple(bbox), date_start, date_end)
         else:
+            if dias > 5:
+                return {"success": False, "message": (
+                    "Las consultas recientes o mixtas siguen limitadas a 5 días por ahora. "
+                    "Para periodos históricos terminados hace más de 120 días, "
+                    "FireTrackers admite hasta 93 días con caché por bloques.")}
             from ingest import run_ingest
             clave = get_query_hash(bbox, date_start, date_end)
             destino = DATA_DIR / "web_preview" / clave
             resultado = run_ingest(bbox, date_start, date_end, destino)
-
         return {
             "success": True,
             "status": "ingest_preview",
-            "message": "Detecciones NASA FIRMS sin armonizar (Sprint 1).",
+            "message": "Detecciones NASA FIRMS listas para armonizar (Sprint 1).",
             "archivos": resultado.get("archivos", {}),
             "estado_sensores": resultado.get("estado_sensores", {}),
             "resumen": resultado.get("resumen", {}),
         }
     except Exception as error:
-        logger.exception("Error al obtener vista preliminar FIRMS")
-        return {"success": False, "message": f"No se pudo consultar NASA FIRMS: {error}"}
+        # No mostrar URLs ni claves dentro del error HTTP.
+        logger.error("Error de consulta FIRMS: %s", type(error).__name__)
+        return {"success": False, "message": (
+            "No se completó la descarga FIRMS. Comprueba disponibilidad, tamaño "
+            "del rango, conexión y clave del servidor. Detalle: "
+            + str(error) if isinstance(error, ValueError) else
+            "No se completó la descarga FIRMS. Revisa la disponibilidad "
+            "y el registro de errores del servidor.")}
 
 
 # Integración Sprints 1 -> 2 -> 3 para regiones externas a la base Colombia.

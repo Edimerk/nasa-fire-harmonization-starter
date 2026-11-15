@@ -43,3 +43,19 @@ desktop.ini
 *.rar
 *.zip
 *.tar.gz
+
+# Consultas y descargas locales NASA FIRMS
+data/historical/
+data/queries/
+data/web_preview/
+
+# Respaldos y scripts exploratorios
+src/app_respaldo_calendario.py
+src/prueba_historico_bbox.py
+
+# Archivos privados y temporales
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]

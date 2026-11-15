@@ -314,3 +314,89 @@ def request_pipeline_execution(
         "modules_status": modules,
         "can_visualize": False
     }
+
+
+# Integración provisional Sprint 1: muestra detecciones SIN armonizar.
+def request_ingest_preview(bbox, date_start, date_end):
+    """Descarga por BBOX usando los módulos ya probados. No simula Sprints 2/3."""
+    val_geo, msg_geo = validate_coordinates(bbox[1], bbox[3], bbox[0], bbox[2])
+    val_dt, msg_dt = validate_dates(date_start, date_end)
+    if not val_geo or not val_dt:
+        return {"success": False, "message": msg_geo if not val_geo else msg_dt}
+
+    try:
+        # Prueba aislada: SP para periodos antiguos, NRT para recientes.
+        # Los periodos mixtos SP/NRT se integrarán posteriormente.
+        antiguo = date_end < datetime.date.today() - datetime.timedelta(days=120)
+        dias = (date_end - date_start).days + 1
+        limite = 31 if antiguo else 5
+        if dias > limite:
+            return {
+                "success": False,
+                "message": (
+                    f"Para esta vista preliminar selecciona máximo {limite} días "
+                    f"(seleccionados: {dias}). El historial completo se habilitará "
+                    "con la integración de los siguientes sprints."
+                ),
+            }
+        if antiguo:
+            from ingest_historico import ejecutar as ejecutar_historico
+            resultado = ejecutar_historico(bbox, date_start, date_end)
+        else:
+            from ingest import run_ingest
+            clave = get_query_hash(bbox, date_start, date_end)
+            destino = DATA_DIR / "web_preview" / clave
+            resultado = run_ingest(bbox, date_start, date_end, destino)
+
+        return {
+            "success": True,
+            "status": "ingest_preview",
+            "message": "Detecciones NASA FIRMS sin armonizar (Sprint 1).",
+            "archivos": resultado.get("archivos", {}),
+            "estado_sensores": resultado.get("estado_sensores", {}),
+            "resumen": resultado.get("resumen", {}),
+        }
+    except Exception as error:
+        logger.exception("Error al obtener vista preliminar FIRMS")
+        return {"success": False, "message": f"No se pudo consultar NASA FIRMS: {error}"}
+
+
+# Integración Sprints 1 -> 2 -> 3 para regiones externas a la base Colombia.
+def request_full_pipeline(bbox, date_start, date_end):
+    """Ingesta NASA -> armonización -> agregaciones. No estima anomalías sin baseline."""
+    ingesta = request_ingest_preview(bbox, date_start, date_end)
+    if not ingesta.get("success"):
+        return ingesta
+
+    try:
+        from harmonize import run_harmonize
+        from analytics import run as run_analytics
+
+        archivos = [Path(ruta) for ruta in ingesta.get("archivos", {}).values() if ruta]
+        existentes = [p for p in archivos if p.exists() and p.name.endswith("_filtrado.csv")]
+        if not existentes:
+            return {"success": True, "status": "no_detections", "message":
+                    "NASA no devolvió detecciones procesadas para esta consulta.",
+                    "estado_sensores": ingesta.get("estado_sensores", {})}
+
+        directorios = {p.parent.resolve() for p in existentes}
+        if len(directorios) != 1:
+            raise ValueError("Los CSV procesados no comparten directorio de origen")
+        processed_dir = existentes[0].parent
+        query_dir = DATA_DIR / "queries" / get_query_hash(bbox, date_start, date_end)
+        harmonized_dir = query_dir / "harmonized"
+        analytics_dir = query_dir / "analytics"
+        final_csv = run_harmonize(processed_dir, harmonized_dir, bbox=bbox)
+        informe = run_analytics(final_csv, analytics_dir,
+                                bbox=bbox, start=date_start.isoformat(),
+                                end=date_end.isoformat())
+        return {"success": True, "status": "pipeline_completed",
+                "csv_path": str(final_csv), "analytics_dir": str(analytics_dir),
+                "analytics_summary": informe,
+                "harmonization_summary": str(harmonized_dir / "resumen_armonizacion.json"),
+                "estado_sensores": ingesta.get("estado_sensores", {}),
+                "message": "Registros armonizados y agregados correctamente."}
+    except Exception as error:
+        logger.exception("Error al procesar Sprints 2 y 3")
+        return {"success": False, "status": "pipeline_error",
+                "message": f"La consulta NASA se realizó, pero falló la armonización o analítica: {error}"}

@@ -48,6 +48,8 @@ from analytics_core import (
     ANOMALY_THRESHOLD_LOW,
 )
 
+from temporal_play import render_player
+
 from pipeline_adapter import (
     request_pipeline_execution, request_ingest_preview, request_full_pipeline,
     is_bbox_covered_by_colombia, FECHA_MIN_COLOMBIA, FECHA_MAX_COLOMBIA,
@@ -770,8 +772,8 @@ if show_side_panel and col_panel is not None:
                 m2.metric("Sensores con registros", str(len(counts_sensor)))
                 m3.metric("Días con detecciones", str(df_active_filtered["timestamp"].dt.date.nunique()))
 
-                t_cal, t_anom, t_tend, t_sens, t_exp = st.tabs([
-                    "📊 Calendario", "📈 Anomalías", "📉 Tendencia", "🛰️ Sensores", "💾 Exportar"])
+                t_cal, t_anom, t_tend, t_sens, t_exp, t_play = st.tabs([
+                    "📊 Calendario", "📈 Anomalías", "📉 Tendencia", "🛰️ Sensores", "💾 Exportar", "▶️ Evolución"])
                 with t_cal:
                     mensual = (df_active_filtered.assign(
                         año=df_active_filtered["timestamp"].dt.year,
@@ -820,6 +822,8 @@ if show_side_panel and col_panel is not None:
                     st.download_button("📥 Descargar CSV armonizado", data=export.to_csv(index=False).encode("utf-8"),
                                        file_name="detecciones_armonizadas.csv", mime="text/csv")
                     st.caption("Los archivos y resúmenes analíticos de la consulta se conservan en data/queries/.")
+                with t_play:
+                    render_player(df_active_filtered, (bw, bs, be, bn), date_start, date_end)
         elif preview_mode:
             st.warning("Vista preliminar NASA FIRMS: detecciones sin armonizar ni deduplicar. No representan las estadísticas finales.")
             st.metric("Detecciones recibidas y filtradas", f"{len(df_active_filtered):,}")
@@ -860,13 +864,12 @@ if show_side_panel and col_panel is not None:
             cal_df = calendar_matrix(df_active_filtered, all_years=sorted(df_active_filtered["year"].unique()))
 
             # Pestañas analíticas compactas dentro del panel
-            t_cal, t_anom, t_tend, t_sens, t_exp = st.tabs([
+            t_cal, t_anom, t_tend, t_sens, t_exp, t_play = st.tabs([
                 "📊 Calendario",
                 "📈 Anomalías",
                 "📉 Tendencia",
                 "🛰️ Sensores",
-                "💾 Exportar",
-            ])
+                "💾 Exportar", "▶️ Evolución"])
 
             # 1. Calendario Heatmap
             with t_cal:
@@ -976,3 +979,7 @@ if show_side_panel and col_panel is not None:
                     type="primary",
                     width="stretch",
                 )
+
+            # Animación de detecciones de Colombia precalculadas.
+            with t_play:
+                render_player(df_active_filtered, (bw, bs, be, bn), date_start, date_end)
